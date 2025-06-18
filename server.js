@@ -124,6 +124,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 
 dotenv.config();
+const PORT = process.env.PORT || 5000;
 
 console.log('Cloud name:', process.env.CLOUDINARY_CLOUD_NAME);
 console.log('API key:', process.env.CLOUDINARY_API_KEY);
@@ -319,6 +320,6 @@ app.use('/api/stats', authMiddleware, statRoutes )
 mongoose.connect(process.env.MONGO_URI)
   .then(() => {
     console.log('✅ MongoDB connected');
-    server.listen(5000, () => console.log('🚀 Server started on port 5000'));
+    server.listen(PORT, () => console.log('🚀 Server started on port 5000'));
   })
   .catch((err) => console.error(err));
