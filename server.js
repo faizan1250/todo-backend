@@ -119,6 +119,8 @@ const friendsRouter = require('./routes/friends');
 const userRoutes = require('./routes/userRoutes');
 const statRoutes = require('./routes/statsRoutes');
 const Challenge = require('./models/Challenge');
+const todoRoutes = require('./routes/TodoRoutes');
+
 
 const cors = require('cors');
 const http = require('http');
@@ -316,11 +318,14 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/friends', authMiddleware, friendsRouter);
 app.use('/api/challenges', authMiddleware, challengeRoutes);
-app.use('/api/stats', authMiddleware, statRoutes )
+app.use('/api/stats', authMiddleware, statRoutes );
+app.use('/api/todos', todoRoutes);
 // DB Connection
 mongoose.connect(process.env.MONGO_URI)
   .then(() => {
     console.log('✅ MongoDB connected');
+    require('./cron/reminderJob'); // after connecting to DB
+    require('./cron/repeatJob'); // ⬅️ after MongoDB connects
     server.listen(PORT, () => console.log('🚀 Server started on port 5000'));
   })
   .catch((err) => console.error(err));

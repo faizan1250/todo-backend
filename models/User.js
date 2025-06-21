@@ -31,7 +31,9 @@ const userSchema = new mongoose.Schema({
     of: String,
     default: {}
   },
-  profilePic: { type: String, default: '' }  // <-- added
+  profilePic: { type: String, default: '' },  // <-- added
+  todoPoints: { type: Number, default: 0 },
+
 });
 
 module.exports = mongoose.model('User', userSchema);
