@@ -1,26 +1,3 @@
-
-const mongoose = require('mongoose');
-
-const userSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  email: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  nickname: { type: String, default: null },
-
-  friends: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  nicknames: {
-    type: Map,
-    of: String,
-    default: {}
-  },
-  profilePic: { type: String, default: '' },  // <-- added
-  todoPoints: { type: Number, default: 0 },
-
-});
-
-module.exports = mongoose.model('User', userSchema);
-
-
 // models/Todo.js
 const mongoose = require('mongoose');
 
@@ -44,6 +21,10 @@ const TodoSchema = new mongoose.Schema({
   reminder: { type: Date },
   isStarred: { type: Boolean, default: false },
   assignedPoints: { type: Number, default: 0 },
+  category: { type: String },
+  startTime: { type: Date },
+  endTime: { type: Date },
+
   notified: { type: Boolean, default: false },
   expoPushToken: { type: String },
   sharedWith: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
@@ -51,13 +32,13 @@ const TodoSchema = new mongoose.Schema({
 
 module.exports = mongoose.model('Todo', TodoSchema);
 
-
 const express = require('express');
 const router = express.Router();
-const { getTodos, createTodo, updateTodo, deleteTodo , getTodoStats,syncTodos} = require('../controllers/todoController');
+const { getTodos, createTodo, updateTodo, deleteTodo , getTodoStats,syncTodos } = require('../controllers/todoController');
 const authMiddleware = require('../middleware/authMiddleware'); // assuming you have JWT auth
 
 const todoController = require('../controllers/todoController');
+const {getCalendarTodos} = require('../controllers/todoController');
 
 
 // Toggle subtask
@@ -68,17 +49,54 @@ router.use(authMiddleware);
 router.get('/', getTodos);
 router.get('/stats', getTodoStats); // add this line
 router.get('/sync', syncTodos);
+router.get('/calendar', getCalendarTodos);
 router.post('/', createTodo);
 router.put('/:id', updateTodo);
 router.patch('/todos/:id/subtasks/:index',  todoController.toggleSubtask);
 router.delete('/:id', deleteTodo);
 
 module.exports = router;
-
 const Todo = require('../models/Todo');
 const User = require('../models/User');
-const moment = require('moment');
 const mongoose = require('mongoose');
+const moment = require('moment');
+
+function calculateStreaks(dates) {
+  let currentStreak = 0, longestStreak = 0, streak = 0;
+  const today = moment().startOf('day');
+  const sortedDates = [...new Set(dates)].sort();
+
+  for (let i = sortedDates.length - 1; i >= 0; i--) {
+    const date = moment(sortedDates[i], 'YYYY-MM-DD');
+
+    if (i === sortedDates.length - 1 && !date.isSame(today, 'day')) continue;
+
+    if (i < sortedDates.length - 1) {
+      const prev = moment(sortedDates[i + 1], 'YYYY-MM-DD');
+      if (prev.diff(date, 'days') !== 1) break;
+    }
+
+    currentStreak++;
+  }
+
+  streak = 1;
+  for (let i = 1; i < sortedDates.length; i++) {
+    const prev = moment(sortedDates[i - 1], 'YYYY-MM-DD');
+    const curr = moment(sortedDates[i], 'YYYY-MM-DD');
+
+    if (curr.diff(prev, 'days') === 1) {
+      streak++;
+      longestStreak = Math.max(longestStreak, streak);
+    } else {
+      streak = 1;
+    }
+  }
+
+  longestStreak = Math.max(longestStreak, currentStreak);
+
+  return { currentStreak, longestStreak };
+}
+
 
 
 
@@ -115,7 +133,6 @@ exports.getTodos = async (req, res) => {
 };
 
 
-
 exports.createTodo = async (req, res) => {
   try {
     const {
@@ -128,7 +145,11 @@ exports.createTodo = async (req, res) => {
       subtasks,
       repeatInterval,
       reminder,
-      isStarred
+      assignedPoints,
+      isStarred,
+      category,
+      startTime,
+      endTime
     } = req.body;
 
     const todo = new Todo({
@@ -142,7 +163,11 @@ exports.createTodo = async (req, res) => {
       subtasks,
       repeatInterval,
       reminder,
-      isStarred
+      assignedPoints,
+      isStarred,
+      category,
+      startTime,
+      endTime
     });
 
     await todo.save();
@@ -152,10 +177,6 @@ exports.createTodo = async (req, res) => {
     res.status(400).json({ error: 'Failed to create todo' });
   }
 };
-
-
-
-//const Todo = require('../models/Todo');
 
 
 
@@ -180,7 +201,10 @@ exports.updateTodo = async (req, res) => {
       repeatInterval,
       reminder,
       isStarred,
-      assignedPoints
+      assignedPoints,
+      category,
+      startTime,
+      endTime
     } = req.body;
 
     if (title !== undefined) todo.title = title;
@@ -194,6 +218,9 @@ exports.updateTodo = async (req, res) => {
     if (reminder !== undefined) todo.reminder = reminder;
     if (isStarred !== undefined) todo.isStarred = isStarred;
     if (assignedPoints !== undefined) todo.assignedPoints = assignedPoints;
+    if (category !== undefined) todo.category = category;
+    if (startTime !== undefined) todo.startTime = startTime;
+    if (endTime !== undefined) todo.endTime = endTime;
 
     await todo.save();
 
@@ -216,6 +243,7 @@ exports.updateTodo = async (req, res) => {
 
 
 
+
 exports.deleteTodo = async (req, res) => {
   try {
     const result = await Todo.findOneAndDelete({ _id: req.params.id, userId: req.user.id });
@@ -230,8 +258,7 @@ exports.getTodoStats = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const [user, todos, trend] = await Promise.all([
-      User.findById(userId),
+    const [todos, trend] = await Promise.all([
       Todo.find({ userId }),
       Todo.aggregate([
         {
@@ -264,8 +291,35 @@ exports.getTodoStats = async (req, res) => {
       0
     );
 
-    const earnedTodoPoints = user.todoPoints || 0;
+    const earnedTodoPoints = completedTodos.reduce(
+      (acc, todo) => acc + (todo.assignedPoints || 0),
+      0
+    );
+
     const completionRate = total === 0 ? 0 : Math.round((completed / total) * 100);
+
+    const streakDates = completedTodos.map((t) =>
+      moment(t.updatedAt).format('YYYY-MM-DD')
+    );
+    const { currentStreak, longestStreak } = calculateStreaks(streakDates);
+    const categoryStats = {};
+const priorityStats = { low: { total: 0, completed: 0 }, medium: { total: 0, completed: 0 }, high: { total: 0, completed: 0 } };
+
+todos.forEach(todo => {
+  const cat = todo.category || 'Uncategorized';
+  const prio = todo.priority || 'low';
+
+  // Category group
+  if (!categoryStats[cat]) categoryStats[cat] = { total: 0, completed: 0 };
+  categoryStats[cat].total++;
+  if (todo.status === 'done') categoryStats[cat].completed++;
+
+  // Priority group
+  if (!priorityStats[prio]) priorityStats[prio] = { total: 0, completed: 0 };
+  priorityStats[prio].total++;
+  if (todo.status === 'done') priorityStats[prio].completed++;
+});
+
 
     res.json({
       total,
@@ -274,12 +328,17 @@ exports.getTodoStats = async (req, res) => {
       trend: trend.map((day) => ({ date: day._id, completed: day.count })),
       earnedTodoPoints,
       totalAvailableTodoPoints,
+      currentStreak,
+      longestStreak,
+      categoryStats,
+      priorityStats
     });
   } catch (err) {
     console.error('Stats error:', err);
     res.status(500).json({ error: 'Failed to fetch stats' });
   }
 };
+
 
 
 exports.syncTodos = async (req, res) => {
@@ -336,15 +395,18 @@ exports.getCalendarTodos = async (req, res) => {
     const from = req.query.from ? moment(req.query.from).startOf('day') : moment().startOf('month');
     const to = req.query.to ? moment(req.query.to).endOf('day') : moment().endOf('month');
 
+    // 🔁 Find todos overlapping with the date range
     const todos = await Todo.find({
       userId,
-      dueDate: { $gte: from.toDate(), $lte: to.toDate() }
+      startTime: { $lte: to.toDate() },   // starts before end of range
+      endTime: { $gte: from.toDate() }    // ends after start of range
     });
 
     const grouped = {};
 
     todos.forEach(todo => {
-      const dateKey = moment(todo.dueDate).format('YYYY-MM-DD');
+      // Use startTime as the key day to group
+      const dateKey = moment(todo.startTime).format('YYYY-MM-DD');
       if (!grouped[dateKey]) grouped[dateKey] = [];
       grouped[dateKey].push(todo);
     });
@@ -355,121 +417,3 @@ exports.getCalendarTodos = async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch calendar todos' });
   }
 };
-const cron = require('node-cron');
-const Todo = require('../models/Todo');
-const { sendPushNotification } = require('../utils/pushUtils'); // we’ll define this
-
-// Run every minute
-cron.schedule('* * * * *', async () => {
-  const now = new Date();
-  try {
-    const todos = await Todo.find({
-      reminder: { $lte: now },
-      notified: false
-    }).populate('userId');
-
-    for (let todo of todos) {
-      // 🔔 Optional: Check if user has pushToken
-      const pushToken = todo.userId?.expoPushToken;
-      if (pushToken) {
-        await sendPushNotification(pushToken, {
-          title: '⏰ Reminder',
-          body: `Task: ${todo.title}`,
-        });
-      }
-
-      todo.notified = true;
-      await todo.save();
-    }
-  } catch (err) {
-    console.error('Cron reminder error:', err);
-  }
-});
-const cron = require('node-cron');
-const Todo = require('../models/Todo');
-const moment = require('moment'); // If not installed: npm i moment
-
-// Runs every day at 1am
-cron.schedule('0 1 * * *', async () => {
-  console.log('🕐 Running recurring todo job...');
-
-  const today = moment().startOf('day');
-
-  const repeatingTodos = await Todo.find({
-    repeatInterval: { $ne: 'none' },
-    dueDate: { $lte: today.toDate() }
-  });
-
-  for (const todo of repeatingTodos) {
-    const newDueDate = moment(todo.dueDate);
-
-    switch (todo.repeatInterval) {
-      case 'daily':
-        newDueDate.add(1, 'day');
-        break;
-      case 'weekly':
-        newDueDate.add(1, 'week');
-        break;
-      case 'monthly':
-        newDueDate.add(1, 'month');
-        break;
-      default:
-        continue;
-    }
-
-    const newTodo = new Todo({
-      userId: todo.userId,
-      title: todo.title,
-      description: todo.description,
-      dueDate: newDueDate.toDate(),
-      priority: todo.priority,
-      status: 'todo',
-      tags: todo.tags,
-      subtasks: todo.subtasks,
-      repeatInterval: todo.repeatInterval,
-      isStarred: todo.isStarred,
-      reminder: todo.reminder,
-      expoPushToken: todo.expoPushToken
-    });
-
-    await newTodo.save();
-
-    // Optional: mark old one as archived
-    todo.status = 'archived';
-    await todo.save();
-  }
-
-  console.log(`🔁 ${repeatingTodos.length} recurring todos processed.`);
-});
-
-
-
-const { Expo } = require('expo-server-sdk');
-const expo = new Expo();
-
-exports.sendPushNotification = async (pushToken, message) => {
-  try {
-    if (!Expo.isExpoPushToken(pushToken)) {
-      console.error(`Invalid Expo push token: ${pushToken}`);
-      return;
-    }
-
-    const ticketChunk = await expo.sendPushNotificationsAsync([{
-      to: pushToken,
-      sound: 'default',
-      ...message,
-    }]);
-    console.log('Push sent:', ticketChunk);
-  } catch (error) {
-    console.error('Push error:', error);
-  }
-};
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => {
-    console.log('✅ MongoDB connected');
-    require('./cron/reminderJob'); // after connecting to DB
-    require('./cron/repeatJob'); // ⬅️ after MongoDB connects
-    server.listen(PORT, () => console.log('🚀 Server started on port 5000'));
-  })
-  .catch((err) => console.error(err));
-
