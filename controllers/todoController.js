@@ -1,7 +1,12 @@
 const Todo = require('../models/Todo');
 const User = require('../models/User');
+const Completion = require('../models/Completion'); // adjust path if needed
+
 const mongoose = require('mongoose');
 const moment = require('moment');
+const generateJoinCode = () => {
+  return Math.random().toString(36).substring(2, 8).toUpperCase(); // e.g. 'F8KD2R'
+};
 
 function calculateStreaks(dates) {
   let currentStreak = 0, longestStreak = 0, streak = 0;
@@ -93,7 +98,7 @@ exports.createTodo = async (req, res) => {
       startTime,
       endTime
     } = req.body;
-
+const joinCode = generateJoinCode();
     const todo = new Todo({
       userId: req.user.id,
       title,
@@ -109,10 +114,13 @@ exports.createTodo = async (req, res) => {
       isStarred,
       category,
       startTime,
-      endTime
+      endTime,
+       joinCode,
+  participants: [req.user.id],
     });
 
     await todo.save();
+    console.log({todo});
     res.status(201).json(todo);
   } catch (err) {
     console.error('❌ Failed to create todo:', err.message);
@@ -357,5 +365,197 @@ exports.getCalendarTodos = async (req, res) => {
   } catch (err) {
     console.error('❌ Calendar fetch failed:', err.message);
     res.status(500).json({ error: 'Failed to fetch calendar todos' });
+  }
+};
+exports.joinTodoByCode = async (req, res) => {
+  const { code } = req.body;
+
+  const todo = await Todo.findOne({ joinCode: code });
+  if (!todo) {
+    return res.status(404).json({ error: 'Invalid join code' });
+  }
+
+  const alreadyJoined = todo.participants.some(
+    p => String(p) === String(req.user.id)
+  );
+
+  if (alreadyJoined) {
+    await todo.populate('participants', 'name email');
+    return res.status(200).json({ message: 'You are already a participant', todo });
+  }
+
+  todo.participants.push(req.user.id);
+  await todo.save();
+
+  await todo.populate('participants', 'name email');
+  res.json({ message: 'Joined successfully', todo });
+};
+
+
+exports.completeSharedTodo = async (req, res) => {
+  const todo = await Todo.findById(req.params.id);
+  if (!todo || !todo.participants.includes(req.user.id)) {
+    return res.status(403).json({ error: 'Not allowed to complete this todo' });
+  }
+
+  // Check if user has already completed via Completion collection
+  const alreadyCompleted = await Completion.findOne({
+    todoId: todo._id,
+    userId: req.user.id
+  });
+
+  if (alreadyCompleted) {
+    return res.status(400).json({ error: 'Already completed' });
+  }
+
+  // Create new Completion entry
+  const completion = new Completion({
+    userId: req.user.id,
+    todoId: todo._id,
+    pointsEarned: todo.assignedPoints || 0
+  });
+
+  await completion.save();
+
+  // Push its ID to the todo
+  todo.completions.push(completion._id);
+  await todo.save();
+
+  // Award points to user
+  const user = await User.findById(req.user.id);
+  user.todoPoints += todo.assignedPoints || 0;
+  await user.save();
+
+  res.json({ message: 'Todo marked as done', todo });
+};
+
+
+exports.getTodoLeaderboard = async (req, res) => {
+  try {
+    const leaderboard = await Completion.aggregate([
+      {
+        $group: {
+          _id: '$userId',
+          totalPoints: { $sum: '$pointsEarned' }
+        }
+      },
+      { $sort: { totalPoints: -1 } },
+      { $limit: 10 },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'user'
+        }
+      },
+      { $unwind: '$user' },
+      {
+        $project: {
+          _id: 0,
+          userId: '$_id',
+          name: '$user.name',
+          totalPoints: 1
+        }
+      }
+    ]);
+
+    res.json(leaderboard);
+  } catch (err) {
+    console.error('Leaderboard error:', err);
+    res.status(500).json({ error: 'Failed to get leaderboard' });
+  }
+};
+
+// Add this to your todoController.js
+exports.getTodoDetails = async (req, res) => {
+  try {
+    const todo = await Todo.findOne({
+      _id: req.params.id,
+      $or: [
+        { userId: req.user.id }, // Owner can always view
+        { participants: req.user.id } // Participants can view
+      ]
+    })
+    .populate('participants', 'name email')
+    .populate({
+      path: 'completions',
+      populate: {
+        path: 'userId',
+        select: 'name'
+      }
+    });
+
+    if (!todo) {
+      return res.status(404).json({ error: 'Todo not found or access denied' });
+    }
+
+    res.json(todo);
+  } catch (err) {
+    console.error('Failed to fetch todo details:', err);
+    res.status(500).json({ error: 'Failed to fetch todo details' });
+  }
+};
+
+exports.updateTodoStatus = async (req, res) => {
+  try {
+    const { status } = req.body;
+    const todo = await Todo.findOneAndUpdate(
+      {
+        _id: req.params.id,
+        $or: [
+          { userId: req.user.id },
+          { participants: req.user.id }
+        ]
+      },
+      { status },
+      { new: true }
+    );
+
+    if (!todo) {
+      return res.status(404).json({ error: 'Todo not found or access denied' });
+    }
+
+    // Handle points and completion history
+    if (status === 'done') {
+      // Add completion record
+      const completion = new Completion({
+        userId: req.user.id,
+        todoId: todo._id,
+        pointsEarned: todo.assignedPoints || 0,
+        completedAt: new Date()
+      });
+      await completion.save();
+
+      // Update user points
+      const user = await User.findById(req.user.id);
+      user.todoPoints += todo.assignedPoints || 0;
+      await user.save();
+      
+      // Add completion to todo (optional)
+      todo.completions.push(completion._id);
+      await todo.save();
+    } 
+    else if (todo.status === 'done') {
+      // Undo completion if status changed from done
+      await Completion.deleteOne({ 
+        userId: req.user.id, 
+        todoId: todo._id 
+      });
+
+      const user = await User.findById(req.user.id);
+      user.todoPoints -= todo.assignedPoints || 0;
+      await user.save();
+    }
+
+    // Populate completions before returning
+    const updatedTodo = await Todo.findById(todo._id)
+      .populate('completions')
+      .populate('completions.userId', 'name');
+
+    res.json(updatedTodo);
+  } catch (err) {
+    console.error('Failed to update status:', err);
+    res.status(500).json({ error: 'Failed to update status' });
   }
 };

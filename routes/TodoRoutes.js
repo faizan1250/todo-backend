@@ -7,6 +7,7 @@ const todoController = require('../controllers/todoController');
 const {getCalendarTodos} = require('../controllers/todoController');
 
 
+
 // Toggle subtask
 
 
@@ -20,5 +21,9 @@ router.post('/', createTodo);
 router.put('/:id', updateTodo);
 router.patch('/todos/:id/subtasks/:index',  todoController.toggleSubtask);
 router.delete('/:id', deleteTodo);
-
+router.post('/join', todoController.joinTodoByCode);
+router.post('/:id/complete', todoController.completeSharedTodo);
+router.get('/leaderboard', todoController.getTodoLeaderboard);
+router.get('/:id', todoController.getTodoDetails);
+router.patch('/:id/status', todoController.updateTodoStatus);
 module.exports = router;

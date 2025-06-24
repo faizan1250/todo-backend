@@ -1,4 +1,3 @@
-// models/Todo.js
 const mongoose = require('mongoose');
 
 const SubtaskSchema = new mongoose.Schema({
@@ -6,32 +5,37 @@ const SubtaskSchema = new mongoose.Schema({
   done: { type: Boolean, default: false }
 });
 
+const CompletionSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  completedAt: { type: Date, default: Date.now },
+  pointsEarned: { type: Number, default: 0 }
+});
+
 const TodoSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   title: { type: String, required: true },
-  description: { type: String },
-  dueDate: { type: Date },
+  description: String,
+  dueDate: Date,
   priority: { type: String, enum: ['low', 'medium', 'high'], default: 'medium' },
   status: { type: String, enum: ['todo', 'in-progress', 'done', 'archived'], default: 'todo' },
-  tags: [{ type: String }],
+  tags: [String],
   subtasks: [SubtaskSchema],
-
   repeatInterval: { type: String, enum: ['none', 'daily', 'weekly', 'monthly'], default: 'none' },
-
-  reminder: { type: Date },
+  reminder: Date,
   isStarred: { type: Boolean, default: false },
   assignedPoints: { type: Number, default: 0 },
-  category: { type: String },
-  startTime: { type: Date },
-  endTime: { type: Date },
-
+  category: String,
+  startTime: Date,
+  endTime: Date,
   notified: { type: Boolean, default: false },
-  expoPushToken: { type: String },
-  sharedWith: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
+  expoPushToken: String,
+  sharedWith: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  joinCode: { type: String, unique: true },
+  participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  completions: [CompletionSchema]
 }, { timestamps: true });
 
 module.exports = mongoose.model('Todo', TodoSchema);
-
 const express = require('express');
 const router = express.Router();
 const { getTodos, createTodo, updateTodo, deleteTodo , getTodoStats,syncTodos } = require('../controllers/todoController');
@@ -39,6 +43,7 @@ const authMiddleware = require('../middleware/authMiddleware'); // assuming you 
 
 const todoController = require('../controllers/todoController');
 const {getCalendarTodos} = require('../controllers/todoController');
+
 
 
 // Toggle subtask
@@ -54,6 +59,10 @@ router.post('/', createTodo);
 router.put('/:id', updateTodo);
 router.patch('/todos/:id/subtasks/:index',  todoController.toggleSubtask);
 router.delete('/:id', deleteTodo);
+router.post('/join', todoController.joinTodoByCode);
+router.post('/:id/complete', todoController.completeSharedTodo);
+router.get('/leaderboard', todoController.getTodoLeaderboard);
+
 
 module.exports = router;
 const Todo = require('../models/Todo');
@@ -415,5 +424,76 @@ exports.getCalendarTodos = async (req, res) => {
   } catch (err) {
     console.error('❌ Calendar fetch failed:', err.message);
     res.status(500).json({ error: 'Failed to fetch calendar todos' });
+  }
+};
+exports.joinTodoByCode = async (req, res) => {
+  const { code } = req.body;
+  const todo = await Todo.findOne({ joinCode: code });
+  if (!todo) return res.status(404).json({ error: 'Invalid join code' });
+
+  if (!todo.participants.includes(req.user.id)) {
+    todo.participants.push(req.user.id);
+    await todo.save();
+  }
+
+  res.json({ message: 'Joined successfully', todo });
+};
+
+exports.completeSharedTodo = async (req, res) => {
+  const todo = await Todo.findById(req.params.id);
+  if (!todo || !todo.participants.includes(req.user.id)) {
+    return res.status(403).json({ error: 'Not allowed to complete this todo' });
+  }
+
+  const alreadyCompleted = todo.completions.some(c => String(c.userId) === req.user.id);
+  if (alreadyCompleted) return res.status(400).json({ error: 'Already completed' });
+
+  todo.completions.push({ userId: req.user.id, pointsEarned: todo.assignedPoints });
+  await todo.save();
+
+  const user = await User.findById(req.user.id);
+  user.todoPoints += todo.assignedPoints;
+  await user.save();
+
+  res.json({ message: 'Todo marked as done', todo });
+};
+
+exports.getTodoLeaderboard = async (req, res) => {
+  try {
+    const leaderboard = await Todo.aggregate([
+      { $unwind: '$completions' },
+      {
+        $group: {
+          _id: '$completions.userId',
+          totalPoints: { $sum: '$completions.pointsEarned' }
+        }
+      },
+      { $sort: { totalPoints: -1 } },
+      { $limit: 10 },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'user'
+        }
+      },
+      {
+        $unwind: '$user'
+      },
+      {
+        $project: {
+          _id: 0,
+          userId: '$_id',
+          name: '$user.name',
+          totalPoints: 1
+        }
+      }
+    ]);
+
+    res.json(leaderboard);
+  } catch (err) {
+    console.error('Leaderboard error:', err);
+    res.status(500).json({ error: 'Failed to get leaderboard' });
   }
 };
