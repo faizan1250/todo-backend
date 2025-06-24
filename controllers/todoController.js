@@ -497,63 +497,107 @@ exports.getTodoDetails = async (req, res) => {
   }
 };
 
+
+
 exports.updateTodoStatus = async (req, res) => {
+
+
   try {
     const { status } = req.body;
-    const todo = await Todo.findOneAndUpdate(
-      {
-        _id: req.params.id,
-        $or: [
-          { userId: req.user.id },
-          { participants: req.user.id }
-        ]
-      },
-      { status },
-      { new: true }
-    );
-
+    const todo = await Todo.findOne({
+      _id: req.params.id,
+      $or: [
+        { userId: req.user.id },
+        { participants: req.user.id }
+      ]
+    });
+  const now = new Date();
+if (now > todo.endTime) {
+  return res.status(400).json({ error: 'This todo has expired. You cannot update its status.' });
+}
     if (!todo) {
       return res.status(404).json({ error: 'Todo not found or access denied' });
     }
+      
 
-    // Handle points and completion history
+
+  
+    let message = '';
+    let pointsEarned = 0;
+
+    // ---- HANDLE DONE ----
     if (status === 'done') {
-      // Add completion record
+      if (todo.status === 'done') {
+        return res.status(400).json({ error: 'Already marked as done' });
+      }
+
+      if (now < todo.startTime || now > todo.endTime) {
+        return res.status(400).json({ error: 'Cannot complete outside the valid time window' });
+      }
+
+      // Save Completion
       const completion = new Completion({
         userId: req.user.id,
         todoId: todo._id,
         pointsEarned: todo.assignedPoints || 0,
-        completedAt: new Date()
+        completedAt: now
       });
       await completion.save();
 
-      // Update user points
+      todo.completions.push(completion._id);
+      todo.status = 'done';
+
+      // Award points
       const user = await User.findById(req.user.id);
       user.todoPoints += todo.assignedPoints || 0;
       await user.save();
-      
-      // Add completion to todo (optional)
-      todo.completions.push(completion._id);
-      await todo.save();
-    } 
-    else if (todo.status === 'done') {
-      // Undo completion if status changed from done
-      await Completion.deleteOne({ 
-        userId: req.user.id, 
-        todoId: todo._id 
-      });
 
-      const user = await User.findById(req.user.id);
-      user.todoPoints -= todo.assignedPoints || 0;
-      await user.save();
+      pointsEarned = todo.assignedPoints || 0;
+      message = `Task completed! +${pointsEarned} points`;
     }
 
-    // Populate completions before returning
-    const updatedTodo = await Todo.findById(todo._id)
-      .populate('completions')
-      .populate('completions.userId', 'name');
+    // ---- HANDLE ARCHIVE ----
+  
 
-    res.json(updatedTodo);
+    // ---- HANDLE ROLLBACK (e.g., done -> in-progress) ----
+    else if (todo.status === 'done' && status !== 'done') {
+      const removed = await Completion.findOneAndDelete({
+        todoId: todo._id,
+        userId: req.user.id
+      });
+
+      if (removed) {
+        const user = await User.findById(req.user.id);
+        user.todoPoints -= removed.pointsEarned;
+        await user.save();
+
+        todo.completions = todo.completions.filter(id => String(id) !== String(removed._id));
+      }
+
+      todo.status = status;
+      message = `Status updated to "${status}" and completion reverted`;
+    }
+
+    // ---- Normal status update ----
+    else {
+      todo.status = status;
+      message = `Status updated to "${status}"`;
+    }
+
+    await todo.save();
+
+    const updatedTodo = await Todo.findById(todo._id)
+      .populate({
+        path: 'completions',
+        populate: { path: 'userId', select: 'name' }
+      })
+      .populate('participants', 'name');
+
+    res.json({
+      message,
+      pointsEarned,
+      todo: updatedTodo
+    });
   } catch (err) {
     console.error('Failed to update status:', err);
     res.status(500).json({ error: 'Failed to update status' });

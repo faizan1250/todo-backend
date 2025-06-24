@@ -14,7 +14,8 @@ const Challenge = require('./models/Challenge');
 const todoRoutes = require('./routes/TodoRoutes');
 const setupLeaderboardCronJob = require('./cron/leaderboardJob');
 const leaderboardRoutes = require('./routes/leaderboardRoutes');
-
+const cron = require('node-cron');
+const autoRepeatTodos = require('./jobs/autoRepeatTodos');
 
 const cors = require('cors');
 const http = require('http');
@@ -178,7 +179,10 @@ mongoose.connect(process.env.MONGO_URI)
   .then(() => {
     console.log('✅ MongoDB connected');
     require('./cron/reminderJob'); // after connecting to DB
-    require('./cron/repeatJob'); // ⬅️ after MongoDB connects
+    cron.schedule('* * * * *', () => {
+  console.log('⏱️ Checking for todos to repeat...');
+  autoRepeatTodos();
+});// ⬅️ after MongoDB connects
     setupLeaderboardCronJob();
     server.listen(PORT, () => console.log('🚀 Server started on port 5000'));
   })

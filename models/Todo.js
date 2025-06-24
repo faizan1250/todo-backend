@@ -13,10 +13,10 @@ const TodoSchema = new mongoose.Schema({
   description: String,
   dueDate: Date,
   priority: { type: String, enum: ['low', 'medium', 'high'], default: 'medium' },
-  status: { type: String, enum: ['todo', 'in-progress', 'done', 'archived'], default: 'todo' },
+  status: { type: String, enum: ['todo', 'in-progress', 'done','missed'], default: 'todo' },
   tags: [String],
   subtasks: [SubtaskSchema],
-  repeatInterval: { type: String, enum: ['none', 'daily', 'weekly', 'monthly'], default: 'none' },
+  repeatInterval: { type: String, enum: ['none', 'repeat'], default: 'none' },
   reminder: Date,
   isStarred: { type: Boolean, default: false },
   assignedPoints: { type: Number, default: 0 },
@@ -28,7 +28,9 @@ const TodoSchema = new mongoose.Schema({
   sharedWith: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   joinCode: { type: String, unique: true },
   participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
- completions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Completion' }]
+ completions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Completion' }],
+ wasRepeated: { type: Boolean, default: false }
+
 
 }, { timestamps: true });
 
