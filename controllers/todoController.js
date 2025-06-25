@@ -520,125 +520,6 @@ exports.joinTodoByCode = async (req, res) => {
 };
 
 
-exports.completeSharedTodo = async (req, res) => {
-  try {
-    const todo = await Todo.findById(req.params.id);
-    const userId = req.user.id;
-
-    if (
-  !todo ||
-  !todo.participants.some(pid => pid.toString() === userId)
- ) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-
-    const now = new Date();
-    if (now > todo.endTime) {
-      return res.status(400).json({ error: 'This todo has expired. You cannot update its status.' });
-    }
-
-    const existing = await Completion.findOne({ userId, todoId: todo._id });
-
-    let message = '';
-    let pointsEarned = 0;
-
-    // ✅ Revert completion
-    if (req.body.revert === true) {
-      if (!existing) {
-        return res.status(400).json({ error: 'You have not completed this todo yet' });
-      }
-
-      await Completion.deleteOne({ _id: existing._id });
-
-      // Remove reference from todo
-      todo.completions = todo.completions.filter(id => String(id) !== String(existing._id));
-      await todo.save();
-
-      // Deduct points from user
-      const user = await User.findById(userId);
-      user.todoPoints -= existing.pointsEarned || 0;
-      await user.save();
-
-      message = '✅ Completion reverted';
-    }
-
-    // ✅ Mark as completed
-    else {
-      if (existing) {
-        return res.status(400).json({ error: 'You already completed this todo' });
-      }
-
-      const completion = new Completion({
-        userId,
-        todoId: todo._id,
-        pointsEarned: todo.assignedPoints || 0,
-        completedAt: now
-      });
-
-      await completion.save();
-
-      todo.completions.push(completion._id);
-      await todo.save();
-
-      const user = await User.findById(userId);
-      user.todoPoints += todo.assignedPoints || 0;
-      await user.save();
-
-      pointsEarned = todo.assignedPoints || 0;
-      message = `✅ Completed! +${pointsEarned} points`;
-    }
-
-    // Final updated response
-    const updatedTodo = await Todo.findById(todo._id)
-      .populate('participants', 'name')
-      .populate({ path: 'completions', populate: { path: 'userId', select: 'name' } });
-
-    res.json({ message, pointsEarned, todo: updatedTodo });
-
-  } catch (err) {
-    console.error('❌ Failed to complete shared todo:', err);
-    res.status(500).json({ error: 'Something went wrong' });
-  }
-};
-
-
-
-exports.getTodoLeaderboard = async (req, res) => {
-  try {
-    const leaderboard = await Completion.aggregate([
-      {
-        $group: {
-          _id: '$userId',
-          totalPoints: { $sum: '$pointsEarned' }
-        }
-      },
-      { $sort: { totalPoints: -1 } },
-      { $limit: 10 },
-      {
-        $lookup: {
-          from: 'users',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'user'
-        }
-      },
-      { $unwind: '$user' },
-      {
-        $project: {
-          _id: 0,
-          userId: '$_id',
-          name: '$user.name',
-          totalPoints: 1
-        }
-      }
-    ]);
-
-    res.json(leaderboard);
-  } catch (err) {
-    console.error('Leaderboard error:', err);
-    res.status(500).json({ error: 'Failed to get leaderboard' });
-  }
-};
 
 // Add this to your todoController.js
 exports.getTodoDetails = async (req, res) => {
@@ -672,102 +553,593 @@ exports.getTodoDetails = async (req, res) => {
 
 
 
+/* =========================================================================
+ *  PATCH  /api/todos/:id/status
+ * ========================================================================= */
 exports.updateTodoStatus = async (req, res) => {
   try {
     const { status } = req.body;
 
+    /* ---------------------------------------------------------------------
+     * 1.  Find the todo the caller can access (creator OR participant)
+     * ------------------------------------------------------------------- */
     const todo = await Todo.findOne({
-  _id: req.params.id,
- $or: [                        // ✅ owner OR participant
-    { userId: req.user.id },
-     { participants: req.user.id }
-  ]
-});
+      _id: req.params.id,
+      $or: [{ userId: req.user.id }, { participants: req.user.id }],
+    });
 
-    if (!todo) return res.status(404).json({ error: 'Todo not found or access denied' });
-
-    const now = new Date();
-
-    // ✅ Reject expired todos
-    if (now > todo.endTime) {
-      return res.status(400).json({ error: 'This todo has expired. You cannot update its status.' });
+    if (!todo) {
+      return res
+        .status(404)
+        .json({ error: 'Todo not found or access denied' });
     }
 
-    // ✅ Reject shared todos from this route
-    if (status === 'done') {
-  // All users – creator included – must POST  /:id/complete
-   return res.status(400).json({ error: 'Use /:id/complete to mark done' });
- }
+    const isShared = (todo.participants?.length ?? 0) > 1;
+    const now      = new Date();
 
-    let message = '';
+    /* ---------------------------------------------------------------------
+     * 2.  Guard: no updates after end-time
+     * ------------------------------------------------------------------- */
+    if (now > todo.endTime) {
+      return res
+        .status(400)
+        .json({ error: 'This todo has expired. You cannot update its status.' });
+    }
+
+    /* ---------------------------------------------------------------------
+     * 3.  Shared todos must use /complete for "done"
+     * ------------------------------------------------------------------- */
+    if (status === 'done' && isShared) {
+      return res
+        .status(400)
+        .json({ error: 'Use /:id/complete to mark done' });
+    }
+
+    let message      = '';
     let pointsEarned = 0;
 
-    // ✅ Handle solo completion
+    /* =====================================================================
+     * 4-A.  SOLO TODO  —  mark DONE
+     * =================================================================== */
     if (status === 'done') {
       if (todo.status === 'done') {
         return res.status(400).json({ error: 'Already marked as done' });
       }
 
-      if (now < todo.startTime || now > todo.endTime) {
-        return res.status(400).json({ error: 'Cannot complete outside the valid time window' });
+      if (now < todo.startTime) {
+        return res
+          .status(400)
+          .json({ error: 'Cannot complete before the start time' });
       }
 
+      /* create completion */
       const completion = new Completion({
-        userId: req.user.id,
-        todoId: todo._id,
+        userId:       req.user.id,
+        todoId:       todo._id,
         pointsEarned: todo.assignedPoints || 0,
-        completedAt: now
+        completedAt:  now,
       });
-
       await completion.save();
 
+      /* update todo */
       todo.status = 'done';
       todo.completions.push(completion._id);
       await todo.save();
 
+      /* update user points */
       const user = await User.findById(req.user.id);
-      user.todoPoints += todo.assignedPoints || 0;
-      await user.save();
+      if (user) {
+        user.todoPoints += todo.assignedPoints || 0;
+        await user.save();
+      }
 
       pointsEarned = todo.assignedPoints || 0;
-      message = `Task completed! +${pointsEarned} points`;
+      message      = `Task completed! +${pointsEarned} points`;
     }
 
-    // ✅ Revert from 'done' to any other status
+    /* =====================================================================
+     * 4-B.  Revert solo DONE  →  any other status
+     * =================================================================== */
     else if (todo.status === 'done' && status !== 'done') {
+      /* remove completion */
       const removed = await Completion.findOneAndDelete({
         todoId: todo._id,
-        userId: req.user.id
+        userId: req.user.id,
       });
 
       if (removed) {
+        /* adjust user points */
         const user = await User.findById(req.user.id);
-        user.todoPoints -= removed.pointsEarned || 0;
-        await user.save();
+        if (user) {
+          user.todoPoints -= removed.pointsEarned || 0;
+          await user.save();
+        }
 
-        todo.completions = todo.completions.filter(id => String(id) !== String(removed._id));
+        /* drop reference from todo */
+        todo.completions = todo.completions.filter(
+          id => String(id) !== String(removed._id)
+        );
       }
 
+      /* update status */
       todo.status = status;
+      await todo.save();
+
       message = `Status reverted to "${status}"`;
     }
 
-    // ✅ Plain status change
+    /* =====================================================================
+     * 4-C.  Plain status change (shared or solo)
+     * =================================================================== */
     else {
       todo.status = status;
+      await todo.save();
       message = `Status updated to "${status}"`;
     }
 
+    /* ---------------------------------------------------------------------
+     * 5.  Return fresh, populated todo
+     * ------------------------------------------------------------------- */
     const updatedTodo = await Todo.findById(todo._id)
       .populate('participants', 'name')
       .populate({
         path: 'completions',
-        populate: { path: 'userId', select: 'name' }
+        populate: { path: 'userId', select: 'name' },
       });
 
-    res.json({ message, pointsEarned, todo: updatedTodo });
+    return res.json({ message, pointsEarned, todo: updatedTodo });
   } catch (err) {
     console.error('❌ Failed to update status:', err);
-    res.status(500).json({ error: 'Something went wrong' });
+    return res.status(500).json({ error: 'Something went wrong' });
+  }
+};
+
+
+
+/* =========================================================================
+ *  POST  /api/todos/:id/complete    (shared todos)
+ * ========================================================================= */
+// exports.completeSharedTodo = async (req, res) => {
+//   try {
+//     const todo   = await Todo.findById(req.params.id);
+//     const userId = req.user.id;
+
+//     /* -------------------------------------------------------------------
+//      * 1.  Access / time guards
+//      * ----------------------------------------------------------------- */
+//     if (
+//       !todo ||
+//       !todo.participants.some(pid => pid.toString() === userId)
+//     ) {
+//       return res.status(403).json({ error: 'Access denied' });
+//     }
+
+//     const now = new Date();
+//     if (now > todo.endTime) {
+//       return res
+//         .status(400)
+//         .json({ error: 'This todo has expired. You cannot update its status.' });
+//     }
+
+//     /* -------------------------------------------------------------------
+//      * 2.  Find existing completion (if any)
+//      * ----------------------------------------------------------------- */
+//     const existing = await Completion.findOne({ userId, todoId: todo._id });
+
+//     let message      = '';
+//     let pointsEarned = 0;
+
+//     /* ===================================================================
+//      * 3-A.  REVERT completion
+//      * ================================================================= */
+//     if (req.body.revert === true) {
+//       if (!existing) {
+//         return res
+//           .status(400)
+//           .json({ error: 'You have not completed this todo yet' });
+//       }
+
+//       /* delete completion */
+//       await Completion.deleteOne({ _id: existing._id });
+
+//       /* remove reference */
+//       todo.completions = todo.completions.filter(
+//         id => String(id) !== String(existing._id)
+//       );
+//       await todo.save();
+
+//       /* deduct points */
+//       const user = await User.findById(userId);
+//       if (user) {
+//         user.todoPoints -= existing.pointsEarned || 0;
+//         await user.save();
+//       }
+
+//       message = '✅ Completion reverted';
+//     }
+
+//     /* ===================================================================
+//      * 3-B.  MARK as completed
+//      * ================================================================= */
+//     else {
+//       if (existing) {
+//         return res
+//           .status(400)
+//           .json({ error: 'You already completed this todo' });
+//       }
+
+//       /* create completion */
+//       const completion = new Completion({
+//         userId,
+//         todoId: todo._id,
+//         pointsEarned: todo.assignedPoints || 0,
+//         completedAt:  now,
+//       });
+//       await completion.save();
+
+//       /* add reference */
+//       todo.completions.push(completion._id);
+//       await todo.save();
+
+//       /* add points */
+//       const user = await User.findById(userId);
+//       if (user) {
+//         user.todoPoints += todo.assignedPoints || 0;
+//         await user.save();
+//       }
+
+//       pointsEarned = todo.assignedPoints || 0;
+//       message      = `✅ Completed! +${pointsEarned} points`;
+//     }
+
+//     /* -------------------------------------------------------------------
+//      * 4.  Return fresh todo
+//      * ----------------------------------------------------------------- */
+//     const updatedTodo = await Todo.findById(todo._id)
+//       .populate('participants', 'name')
+//       .populate({
+//         path: 'completions',
+//         populate: { path: 'userId', select: 'name' },
+//       });
+
+//     return res.json({ message, pointsEarned, todo: updatedTodo });
+//   } catch (err) {
+//     console.error('❌ Failed to complete shared todo:', err);
+//     return res.status(500).json({ error: 'Something went wrong' });
+//   }
+// };
+
+exports.completeSharedTodo = async (req, res) => {
+  try {
+    // 1. Fetch the todo with necessary population
+    const todo = await Todo.findById(req.params.id)
+      .populate('participants')
+      .populate({
+        path: 'completions',
+        populate: { path: 'userId' }
+      });
+    
+    const userId = req.user.id;
+
+    // =====================================================================
+    // ACCESS CONTROL & VALIDATION
+    // =====================================================================
+    
+    if (!todo || !todo.participants.some(pid => pid._id.toString() === userId)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const now = new Date();
+    if (now > todo.endTime) {
+      return res.status(400).json({ 
+        error: 'This todo has expired. You cannot update its status.' 
+      });
+    }
+
+    // =====================================================================
+    // COMPLETION LOGIC
+    // =====================================================================
+
+    const existing = todo.completions.find(c => c.userId._id.toString() === userId);
+    let message = '';
+    let pointsEarned = 0;
+    let shouldUpdateTodoStatus = false;
+
+    // ---------------------------------------------------------------------
+    // CASE 1: REVERTING COMPLETION
+    // ---------------------------------------------------------------------
+    if (req.body.revert === true) {
+      if (!existing) {
+        return res.status(400).json({ 
+          error: 'You have not completed this todo yet' 
+        });
+      }
+
+      await Completion.deleteOne({ _id: existing._id });
+      todo.completions = todo.completions.filter(
+        c => c._id.toString() !== existing._id.toString()
+      );
+      await todo.save();
+
+      const user = await User.findById(userId);
+      if (user) {
+        user.todoPoints -= existing.pointsEarned || 0;
+        await user.save();
+      }
+
+      shouldUpdateTodoStatus = true;
+      message = '✅ Completion reverted';
+    } 
+    
+    // ---------------------------------------------------------------------
+    // CASE 2: MARKING AS COMPLETED
+    // ---------------------------------------------------------------------
+    else {
+      if (existing) {
+        return res.status(400).json({ 
+          error: 'You already completed this todo' 
+        });
+      }
+
+      const completion = new Completion({
+        userId,
+        todoId: todo._id,
+        pointsEarned: todo.assignedPoints || 0,
+        completedAt: now,
+      });
+      await completion.save();
+
+      // Populate the new completion for response
+      const populatedCompletion = await Completion.populate(completion, {
+        path: 'userId',
+        select: 'name'
+      });
+
+      todo.completions.push(populatedCompletion);
+      await todo.save();
+
+      const user = await User.findById(userId);
+      if (user) {
+        user.todoPoints += todo.assignedPoints || 0;
+        await user.save();
+      }
+
+      pointsEarned = todo.assignedPoints || 0;
+      message = `✅ Completed! +${pointsEarned} points`;
+
+      // Check if all participants have completed
+      const allCompleted = todo.participants.every(participant => 
+        todo.completions.some(c => c.userId._id.toString() === participant._id.toString())
+      );
+
+      if (allCompleted) {
+        shouldUpdateTodoStatus = true;
+      }
+    }
+
+    // =====================================================================
+    // UPDATE TODO STATUS IF NEEDED
+    // =====================================================================
+    if (shouldUpdateTodoStatus) {
+      const newStatus = req.body.revert ? 'in-progress' : 'done';
+      todo.status = newStatus;
+      await todo.save();
+    }
+
+    // =====================================================================
+    // RETURN UPDATED TODO
+    // =====================================================================
+    // Refresh the todo with latest data
+    const updatedTodo = await Todo.findById(todo._id)
+      .populate('participants', 'name')
+      .populate({
+        path: 'completions',
+        populate: { path: 'userId', select: 'name' },
+      })
+      .lean();
+
+    return res.json({ 
+      success: true,
+      message, 
+      pointsEarned, 
+      todo: updatedTodo,
+      statusUpdated: shouldUpdateTodoStatus
+    });
+
+  } catch (err) {
+    console.error('❌ Failed to complete shared todo:', err);
+    return res.status(500).json({ 
+      success: false,
+      error: 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
+  }
+};
+
+
+exports.getTodoLeaderboard = async (req, res) => {
+  try {
+    const userId = new mongoose.Types.ObjectId(req.user.id);
+    const mode   = (req.query.mode || 'live').toString();  // live, month, hall
+    const year   = new Date().getFullYear();
+
+    /* ------------------------------------------------------------
+     * 0.  Base $match: completions only on shared todos
+     *     where *current user* is creator or participant
+     * ---------------------------------------------------------- */
+    const baseMatch = [
+      // join todo
+      {
+        $lookup: {
+          from: 'todos',
+          localField: 'todoId',
+          foreignField: '_id',
+          as: 'todo'
+        }
+      },
+      { $unwind: '$todo' },
+
+      // shared & I'm involved
+      {
+        $match: {
+          $expr: { $gt: [ { $size: '$todo.participants' }, 1 ] },
+          $or: [
+            { 'todo.userId': userId },
+            { 'todo.participants': userId }
+          ]
+        }
+      }
+    ];
+
+    /* ============================================================
+     * 1.  LIVE  –  lifetime leaderboard
+     * ========================================================== */
+    if (mode === 'live') {
+      const leaderboard = await Completion.aggregate([
+        ...baseMatch,
+        {
+          $group: {
+            _id: '$userId',
+            totalPoints: { $sum: '$pointsEarned' }
+          }
+        },
+        { $sort: { totalPoints: -1 } },
+        { $limit: 10 },
+        {
+          $lookup: {
+            from: 'users',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'user'
+          }
+        },
+        { $unwind: '$user' },
+        {
+          $project: {
+            _id: 0,
+            userId: '$_id',
+            name: '$user.name',
+            totalPoints: 1
+          }
+        }
+      ]);
+
+      return res.json({ mode: 'live', leaderboard });
+    }
+
+    /* ============================================================
+     * 2.  MONTH  –  leaderboard for a given month of current year
+     * ========================================================== */
+    if (mode === 'month') {
+      const monthInt = parseInt(req.query.month, 10) || (new Date().getMonth() + 1);
+      if (monthInt < 1 || monthInt > 12)
+        return res.status(400).json({ error: 'Month must be 1-12' });
+
+      const monthStart = new Date(year, monthInt - 1, 1);
+      const monthEnd   = new Date(year, monthInt, 1);  // first day of next month
+
+      const leaderboard = await Completion.aggregate([
+        ...baseMatch,
+        {
+          $match: {
+            completedAt: { $gte: monthStart, $lt: monthEnd }
+          }
+        },
+        {
+          $group: {
+            _id: '$userId',
+            totalPoints: { $sum: '$pointsEarned' }
+          }
+        },
+        { $sort: { totalPoints: -1 } },
+        { $limit: 10 },
+        {
+          $lookup: {
+            from: 'users',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'user'
+          }
+        },
+        { $unwind: '$user' },
+        {
+          $project: {
+            _id: 0,
+            userId: '$_id',
+            name:   '$user.name',
+            totalPoints: 1
+          }
+        }
+      ]);
+
+      return res.json({ mode: 'month', month: monthInt, leaderboard });
+    }
+
+    /* ============================================================
+     * 3.  HALL OF FAME  –  wins per user this year
+     * ========================================================== */
+    if (mode === 'hall') {
+      /* 3-A.  aggregate points per (month, user) */
+      const monthlyPoints = await Completion.aggregate([
+        ...baseMatch,
+        {
+          $match: {
+            completedAt: {
+              $gte: new Date(`${year}-01-01T00:00:00Z`),
+              $lt:  new Date(`${year + 1}-01-01T00:00:00Z`)
+            }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              month: { $month: '$completedAt' },
+              user:  '$userId'
+            },
+            points: { $sum: '$pointsEarned' }
+          }
+        }
+      ]);
+
+      /* 3-B.  build a winner map in JS */
+      const wins = new Map();           // userId → winCount
+      const monthBuckets = Array.from({ length: 12 }, () => []);
+
+      monthlyPoints.forEach(p => {
+        monthBuckets[p._id.month - 1].push(p);
+      });
+
+      monthBuckets.forEach(bucket => {
+        if (!bucket.length) return;
+        const max = Math.max(...bucket.map(b => b.points));
+        bucket
+          .filter(b => b.points === max) // handle ties
+          .forEach(b => {
+            const key = String(b._id.user);
+            wins.set(key, (wins.get(key) || 0) + 1);
+          });
+      });
+
+      /* 3-C.  fetch user names and format */
+      const hallOfFame = await Promise.all(
+        Array.from(wins.entries()).map(async ([uid, winCount]) => {
+          const user = await User.findById(uid, 'name');
+          return {
+            userId: uid,
+            name: user ? user.name : 'Unknown',
+            wins: winCount
+          };
+        })
+      );
+
+      hallOfFame.sort((a, b) => b.wins - a.wins); // most wins first
+
+      return res.json({ mode: 'hall', year, hallOfFame });
+    }
+
+    return res.status(400).json({ error: 'Invalid mode' });
+  } catch (err) {
+    console.error('Leaderboard error:', err);
+    return res.status(500).json({ error: 'Failed to get leaderboard' });
   }
 };

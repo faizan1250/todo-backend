@@ -26,7 +26,7 @@ const TodoSchema = new mongoose.Schema({
   notified: { type: Boolean, default: false },
   expoPushToken: String,
   sharedWith: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  joinCode: { type: String, unique: true },
+  joinCode: { type: String, unique: true, sparse: true },
   participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
  completions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Completion' }],
  wasRepeated: { type: Boolean, default: false }

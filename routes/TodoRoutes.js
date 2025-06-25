@@ -5,7 +5,7 @@ const authMiddleware = require('../middleware/authMiddleware'); // assuming you 
 
 const todoController = require('../controllers/todoController');
 const {getCalendarTodos} = require('../controllers/todoController');
-const { getLeaderboard } = require('../controllers/leaderboardController');
+//const { getLeaderboard } = require('../controllers/leaderboardController');
 
 
 // Toggle subtask
@@ -23,8 +23,8 @@ router.patch('/todos/:id/subtasks/:index',  todoController.toggleSubtask);
 router.delete('/:id', deleteTodo);
 router.post('/join', todoController.joinTodoByCode);
 router.post('/:id/complete', todoController.completeSharedTodo);
-router.get('/leaderboard', todoController.getTodoLeaderboard);
+//router.get('/leaderboard', todoController.getTodoLeaderboard);
 router.get('/:id', todoController.getTodoDetails);
 router.patch('/:id/status', todoController.updateTodoStatus);
-router.get('/shared/leaderboard', getLeaderboard);
+router.get('/shared/leaderboard', todoController.getTodoLeaderboard);
 module.exports = router;
