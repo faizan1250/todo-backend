@@ -8,41 +8,45 @@ const generateJoinCode = () => {
   return Math.random().toString(36).substring(2, 8).toUpperCase(); // e.g. 'F8KD2R'
 };
 
+
 function calculateStreaks(dates) {
-  let currentStreak = 0, longestStreak = 0, streak = 0;
-  const today = moment().startOf('day');
-  const sortedDates = [...new Set(dates)].sort();
+  const uniqueDates = [...new Set(dates)].sort(); // Deduplicate & sort
+  const formattedDates = uniqueDates.map(d => moment(d, 'YYYY-MM-DD'));
 
-  for (let i = sortedDates.length - 1; i >= 0; i--) {
-    const date = moment(sortedDates[i], 'YYYY-MM-DD');
+  let currentStreak = 0;
+  let longestStreak = 0;
+  let streak = 1;
 
-    if (i === sortedDates.length - 1 && !date.isSame(today, 'day')) continue;
+  // Check current streak from the end
+  for (let i = formattedDates.length - 1; i >= 0; i--) {
+    const date = formattedDates[i];
+    const expected = moment().startOf('day').subtract(formattedDates.length - 1 - i, 'days');
 
-    if (i < sortedDates.length - 1) {
-      const prev = moment(sortedDates[i + 1], 'YYYY-MM-DD');
-      if (prev.diff(date, 'days') !== 1) break;
+    if (date.isSame(expected, 'day')) {
+      currentStreak++;
+    } else {
+      break;
     }
-
-    currentStreak++;
   }
 
-  streak = 1;
-  for (let i = 1; i < sortedDates.length; i++) {
-    const prev = moment(sortedDates[i - 1], 'YYYY-MM-DD');
-    const curr = moment(sortedDates[i], 'YYYY-MM-DD');
+  // Check longest streak overall
+  for (let i = 1; i < formattedDates.length; i++) {
+    const prev = formattedDates[i - 1];
+    const curr = formattedDates[i];
 
     if (curr.diff(prev, 'days') === 1) {
       streak++;
-      longestStreak = Math.max(longestStreak, streak);
     } else {
+      longestStreak = Math.max(longestStreak, streak);
       streak = 1;
     }
   }
 
-  longestStreak = Math.max(longestStreak, currentStreak);
+  longestStreak = Math.max(longestStreak, streak);
 
   return { currentStreak, longestStreak };
 }
+
 
 
 
@@ -55,12 +59,18 @@ exports.getTodos = async (req, res) => {
       tag,
       dueBefore,
       dueAfter,
-      sort = 'dueDate', // default sort field
-      order = 'asc',     // asc or desc
+      sort = 'dueDate',
+      order = 'asc',
       limit = 100
     } = req.query;
 
-    const query = { userId: req.user.id };
+    // 🔁 Fetch todos owned or shared with the user
+    const query = {
+      $or: [
+        { userId: req.user.id },
+        { participants: req.user.id }
+      ]
+    };
 
     if (status) query.status = status;
     if (priority) query.priority = priority;
@@ -78,6 +88,7 @@ exports.getTodos = async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch todos' });
   }
 };
+
 
 
 exports.createTodo = async (req, res) => {
@@ -204,78 +215,196 @@ exports.deleteTodo = async (req, res) => {
   }
 };
 
+// exports.getTodoStats = async (req, res) => {
+//   try {
+//     const userId = req.user.id;
+
+//     const [todos, trend] = await Promise.all([
+//       Todo.find({ userId }),
+//       Todo.aggregate([
+//         {
+//           $match: {
+//             userId: new mongoose.Types.ObjectId(userId),
+//             status: 'done',
+//             updatedAt: {
+//               $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // last 7 days
+//             },
+//           },
+//         },
+//         {
+//           $group: {
+//             _id: {
+//               $dateToString: { format: '%Y-%m-%d', date: '$updatedAt' },
+//             },
+//             count: { $sum: 1 },
+//           },
+//         },
+//         { $sort: { _id: 1 } },
+//       ]),
+//     ]);
+
+//     const completedTodos = todos.filter((todo) => todo.status === 'done');
+//     const total = todos.length;
+//     const completed = completedTodos.length;
+
+//     const totalAvailableTodoPoints = todos.reduce(
+//       (acc, todo) => acc + (todo.assignedPoints || 0),
+//       0
+//     );
+
+//     const earnedTodoPoints = completedTodos.reduce(
+//       (acc, todo) => acc + (todo.assignedPoints || 0),
+//       0
+//     );
+
+//     const completionRate = total === 0 ? 0 : Math.round((completed / total) * 100);
+
+//     const streakDates = completedTodos.map((t) =>
+//       moment(t.updatedAt).format('YYYY-MM-DD')
+//     );
+//     const { currentStreak, longestStreak } = calculateStreaks(streakDates);
+//     const categoryStats = {};
+// const priorityStats = { low: { total: 0, completed: 0 }, medium: { total: 0, completed: 0 }, high: { total: 0, completed: 0 } };
+
+// todos.forEach(todo => {
+//   const cat = todo.category || 'Uncategorized';
+//   const prio = todo.priority || 'low';
+
+//   // Category group
+//   if (!categoryStats[cat]) categoryStats[cat] = { total: 0, completed: 0 };
+//   categoryStats[cat].total++;
+//   if (todo.status === 'done') categoryStats[cat].completed++;
+
+//   // Priority group
+//   if (!priorityStats[prio]) priorityStats[prio] = { total: 0, completed: 0 };
+//   priorityStats[prio].total++;
+//   if (todo.status === 'done') priorityStats[prio].completed++;
+// });
+
+
+//     res.json({
+//       total,
+//       completed,
+//       completionRate,
+//       trend: trend.map((day) => ({ date: day._id, completed: day.count })),
+//       earnedTodoPoints,
+//       totalAvailableTodoPoints,
+//       currentStreak,
+//       longestStreak,
+//       categoryStats,
+//       priorityStats
+//     });
+//   } catch (err) {
+//     console.error('Stats error:', err);
+//     res.status(500).json({ error: 'Failed to fetch stats' });
+//   }
+// };
+
+
+
+//32
+
+
+
 exports.getTodoStats = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const [todos, trend] = await Promise.all([
-      Todo.find({ userId }),
-      Todo.aggregate([
-        {
-          $match: {
-            userId: new mongoose.Types.ObjectId(userId),
-            status: 'done',
-            updatedAt: {
-              $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // last 7 days
-            },
+    // Fetch todos where user is owner or participant
+    const todos = await Todo.find({
+      $or: [{ userId }, { participants: userId }]
+    }).select('_id title category priority assignedPoints userId participants');
+
+    // Build valid todo ID list (user has access)
+    const validTodoIds = new Set(
+      todos.map(t => t._id.toString())
+    );
+
+    // Fetch user's completions
+    const completions = await Completion.find({ userId });
+
+    // Filter completions to only include valid todos
+    const validCompletions = completions.filter(c =>
+      validTodoIds.has(c.todoId.toString())
+    );
+
+    // 1. Completion Trend (last 7 days)
+    const trend = await Completion.aggregate([
+      {
+        $match: {
+          userId: new mongoose.Types.ObjectId(userId),
+          completedAt: {
+            $gte: moment().subtract(7, 'days').startOf('day').toDate()
           },
-        },
-        {
-          $group: {
-            _id: {
-              $dateToString: { format: '%Y-%m-%d', date: '$updatedAt' },
-            },
-            count: { $sum: 1 },
+          todoId: { $in: Array.from(validTodoIds).map(id => new mongoose.Types.ObjectId(id)) }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: '%Y-%m-%d', date: '$completedAt' }
           },
-        },
-        { $sort: { _id: 1 } },
-      ]),
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } }
     ]);
 
-    const completedTodos = todos.filter((todo) => todo.status === 'done');
+    // 2. Point Calculations
     const total = todos.length;
-    const completed = completedTodos.length;
+    const completed = validCompletions.length;
+    const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
 
-    const totalAvailableTodoPoints = todos.reduce(
-      (acc, todo) => acc + (todo.assignedPoints || 0),
-      0
+    const earnedTodoPoints = validCompletions.reduce(
+      (sum, c) => sum + (c.pointsEarned || 0), 0
     );
 
-    const earnedTodoPoints = completedTodos.reduce(
-      (acc, todo) => acc + (todo.assignedPoints || 0),
-      0
-    );
+    const totalAvailableTodoPoints = todos.reduce((sum, t) => {
+      const isUserParticipant =
+        t.userId.toString() === userId ||
+        (t.participants || []).map(p => p.toString()).includes(userId);
+      return isUserParticipant ? sum + (t.assignedPoints || 0) : sum;
+    }, 0);
 
-    const completionRate = total === 0 ? 0 : Math.round((completed / total) * 100);
-
-    const streakDates = completedTodos.map((t) =>
-      moment(t.updatedAt).format('YYYY-MM-DD')
+    // 3. Streak Calculation
+    const streakDates = validCompletions.map(c =>
+      moment(c.completedAt).format('YYYY-MM-DD')
     );
     const { currentStreak, longestStreak } = calculateStreaks(streakDates);
+
+    // 4. Category & Priority Stats
     const categoryStats = {};
-const priorityStats = { low: { total: 0, completed: 0 }, medium: { total: 0, completed: 0 }, high: { total: 0, completed: 0 } };
+    const priorityStats = {
+      low: { total: 0, completed: 0 },
+      medium: { total: 0, completed: 0 },
+      high: { total: 0, completed: 0 }
+    };
 
-todos.forEach(todo => {
-  const cat = todo.category || 'Uncategorized';
-  const prio = todo.priority || 'low';
+    for (const todo of todos) {
+      const cat = todo.category || 'Uncategorized';
+      const prio = todo.priority || 'low';
 
-  // Category group
-  if (!categoryStats[cat]) categoryStats[cat] = { total: 0, completed: 0 };
-  categoryStats[cat].total++;
-  if (todo.status === 'done') categoryStats[cat].completed++;
+      if (!categoryStats[cat]) categoryStats[cat] = { total: 0, completed: 0 };
+      categoryStats[cat].total++;
 
-  // Priority group
-  if (!priorityStats[prio]) priorityStats[prio] = { total: 0, completed: 0 };
-  priorityStats[prio].total++;
-  if (todo.status === 'done') priorityStats[prio].completed++;
-});
+      if (!priorityStats[prio]) priorityStats[prio] = { total: 0, completed: 0 };
+      priorityStats[prio].total++;
 
+      const isCompleted = validCompletions.some(c =>
+        c.todoId.toString() === todo._id.toString()
+      );
+      if (isCompleted) {
+        categoryStats[cat].completed++;
+        priorityStats[prio].completed++;
+      }
+    }
 
+    // Final result
     res.json({
       total,
       completed,
       completionRate,
-      trend: trend.map((day) => ({ date: day._id, completed: day.count })),
+      trend: trend.map(day => ({ date: day._id, completed: day.count })),
       earnedTodoPoints,
       totalAvailableTodoPoints,
       currentStreak,
@@ -288,7 +417,6 @@ todos.forEach(todo => {
     res.status(500).json({ error: 'Failed to fetch stats' });
   }
 };
-
 
 
 exports.syncTodos = async (req, res) => {
@@ -393,41 +521,86 @@ exports.joinTodoByCode = async (req, res) => {
 
 
 exports.completeSharedTodo = async (req, res) => {
-  const todo = await Todo.findById(req.params.id);
-  if (!todo || !todo.participants.includes(req.user.id)) {
-    return res.status(403).json({ error: 'Not allowed to complete this todo' });
+  try {
+    const todo = await Todo.findById(req.params.id);
+    const userId = req.user.id;
+
+    if (
+  !todo ||
+  !todo.participants.some(pid => pid.toString() === userId)
+ ) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const now = new Date();
+    if (now > todo.endTime) {
+      return res.status(400).json({ error: 'This todo has expired. You cannot update its status.' });
+    }
+
+    const existing = await Completion.findOne({ userId, todoId: todo._id });
+
+    let message = '';
+    let pointsEarned = 0;
+
+    // ✅ Revert completion
+    if (req.body.revert === true) {
+      if (!existing) {
+        return res.status(400).json({ error: 'You have not completed this todo yet' });
+      }
+
+      await Completion.deleteOne({ _id: existing._id });
+
+      // Remove reference from todo
+      todo.completions = todo.completions.filter(id => String(id) !== String(existing._id));
+      await todo.save();
+
+      // Deduct points from user
+      const user = await User.findById(userId);
+      user.todoPoints -= existing.pointsEarned || 0;
+      await user.save();
+
+      message = '✅ Completion reverted';
+    }
+
+    // ✅ Mark as completed
+    else {
+      if (existing) {
+        return res.status(400).json({ error: 'You already completed this todo' });
+      }
+
+      const completion = new Completion({
+        userId,
+        todoId: todo._id,
+        pointsEarned: todo.assignedPoints || 0,
+        completedAt: now
+      });
+
+      await completion.save();
+
+      todo.completions.push(completion._id);
+      await todo.save();
+
+      const user = await User.findById(userId);
+      user.todoPoints += todo.assignedPoints || 0;
+      await user.save();
+
+      pointsEarned = todo.assignedPoints || 0;
+      message = `✅ Completed! +${pointsEarned} points`;
+    }
+
+    // Final updated response
+    const updatedTodo = await Todo.findById(todo._id)
+      .populate('participants', 'name')
+      .populate({ path: 'completions', populate: { path: 'userId', select: 'name' } });
+
+    res.json({ message, pointsEarned, todo: updatedTodo });
+
+  } catch (err) {
+    console.error('❌ Failed to complete shared todo:', err);
+    res.status(500).json({ error: 'Something went wrong' });
   }
-
-  // Check if user has already completed via Completion collection
-  const alreadyCompleted = await Completion.findOne({
-    todoId: todo._id,
-    userId: req.user.id
-  });
-
-  if (alreadyCompleted) {
-    return res.status(400).json({ error: 'Already completed' });
-  }
-
-  // Create new Completion entry
-  const completion = new Completion({
-    userId: req.user.id,
-    todoId: todo._id,
-    pointsEarned: todo.assignedPoints || 0
-  });
-
-  await completion.save();
-
-  // Push its ID to the todo
-  todo.completions.push(completion._id);
-  await todo.save();
-
-  // Award points to user
-  const user = await User.findById(req.user.id);
-  user.todoPoints += todo.assignedPoints || 0;
-  await user.save();
-
-  res.json({ message: 'Todo marked as done', todo });
 };
+
 
 
 exports.getTodoLeaderboard = async (req, res) => {
@@ -500,32 +673,36 @@ exports.getTodoDetails = async (req, res) => {
 
 
 exports.updateTodoStatus = async (req, res) => {
-
-
   try {
     const { status } = req.body;
+
     const todo = await Todo.findOne({
-      _id: req.params.id,
-      $or: [
-        { userId: req.user.id },
-        { participants: req.user.id }
-      ]
-    });
-  const now = new Date();
-if (now > todo.endTime) {
-  return res.status(400).json({ error: 'This todo has expired. You cannot update its status.' });
-}
-    if (!todo) {
-      return res.status(404).json({ error: 'Todo not found or access denied' });
+  _id: req.params.id,
+ $or: [                        // ✅ owner OR participant
+    { userId: req.user.id },
+     { participants: req.user.id }
+  ]
+});
+
+    if (!todo) return res.status(404).json({ error: 'Todo not found or access denied' });
+
+    const now = new Date();
+
+    // ✅ Reject expired todos
+    if (now > todo.endTime) {
+      return res.status(400).json({ error: 'This todo has expired. You cannot update its status.' });
     }
-      
 
+    // ✅ Reject shared todos from this route
+    if (status === 'done') {
+  // All users – creator included – must POST  /:id/complete
+   return res.status(400).json({ error: 'Use /:id/complete to mark done' });
+ }
 
-  
     let message = '';
     let pointsEarned = 0;
 
-    // ---- HANDLE DONE ----
+    // ✅ Handle solo completion
     if (status === 'done') {
       if (todo.status === 'done') {
         return res.status(400).json({ error: 'Already marked as done' });
@@ -535,19 +712,19 @@ if (now > todo.endTime) {
         return res.status(400).json({ error: 'Cannot complete outside the valid time window' });
       }
 
-      // Save Completion
       const completion = new Completion({
         userId: req.user.id,
         todoId: todo._id,
         pointsEarned: todo.assignedPoints || 0,
         completedAt: now
       });
+
       await completion.save();
 
-      todo.completions.push(completion._id);
       todo.status = 'done';
+      todo.completions.push(completion._id);
+      await todo.save();
 
-      // Award points
       const user = await User.findById(req.user.id);
       user.todoPoints += todo.assignedPoints || 0;
       await user.save();
@@ -556,10 +733,7 @@ if (now > todo.endTime) {
       message = `Task completed! +${pointsEarned} points`;
     }
 
-    // ---- HANDLE ARCHIVE ----
-  
-
-    // ---- HANDLE ROLLBACK (e.g., done -> in-progress) ----
+    // ✅ Revert from 'done' to any other status
     else if (todo.status === 'done' && status !== 'done') {
       const removed = await Completion.findOneAndDelete({
         todoId: todo._id,
@@ -568,38 +742,32 @@ if (now > todo.endTime) {
 
       if (removed) {
         const user = await User.findById(req.user.id);
-        user.todoPoints -= removed.pointsEarned;
+        user.todoPoints -= removed.pointsEarned || 0;
         await user.save();
 
         todo.completions = todo.completions.filter(id => String(id) !== String(removed._id));
       }
 
       todo.status = status;
-      message = `Status updated to "${status}" and completion reverted`;
+      message = `Status reverted to "${status}"`;
     }
 
-    // ---- Normal status update ----
+    // ✅ Plain status change
     else {
       todo.status = status;
       message = `Status updated to "${status}"`;
     }
 
-    await todo.save();
-
     const updatedTodo = await Todo.findById(todo._id)
+      .populate('participants', 'name')
       .populate({
         path: 'completions',
         populate: { path: 'userId', select: 'name' }
-      })
-      .populate('participants', 'name');
+      });
 
-    res.json({
-      message,
-      pointsEarned,
-      todo: updatedTodo
-    });
+    res.json({ message, pointsEarned, todo: updatedTodo });
   } catch (err) {
-    console.error('Failed to update status:', err);
-    res.status(500).json({ error: 'Failed to update status' });
+    console.error('❌ Failed to update status:', err);
+    res.status(500).json({ error: 'Something went wrong' });
   }
 };
