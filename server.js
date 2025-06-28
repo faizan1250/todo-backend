@@ -184,6 +184,6 @@ mongoose.connect(process.env.MONGO_URI)
   autoRepeatTodos();
 });// ⬅️ after MongoDB connects
     setupLeaderboardCronJob();
-    server.listen(PORT, () => console.log('🚀 Server started on port 5000'));
+    server.listen(PORT, () => console.log('Server started on port 5000'));
   })
   .catch((err) => console.error(err));
